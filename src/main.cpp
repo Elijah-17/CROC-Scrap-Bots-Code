@@ -32,6 +32,7 @@ XboxSeriesXControllerESP32_asukiaaa::Core xboxController;
 #define R_CHANNEL 1
 #define W_CHANNEL 2
 
+#define LED_PIN 2
 /* ========= STATE FLAGS ========= */
 bool robotEnabled = false;
 bool connectedPrinted = false;
@@ -42,6 +43,10 @@ bool rbWasPressed = false;
 bool toggleArmed = false;
 
 unsigned long lastNotConnectedPrint = 0;
+
+unsigned long ledTimer = 0;
+bool ledState = false;
+bool firstValidInputReceived = false;
 
 /* ========= HELPER FUNCTIONS ========= */
 
@@ -87,6 +92,9 @@ void setup() {
 
   xboxController.begin();
 
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
   pinMode(LA, OUTPUT);
   pinMode(LB, OUTPUT);
   pinMode(RA, OUTPUT);
@@ -109,6 +117,30 @@ void setup() {
 
 void loop() {
   xboxController.onLoop();
+
+/* ===== LED STATUS HANDLING ===== */
+// Rapid blink while not connected
+  if (!xboxController.isConnected()) {
+    if (millis() - ledTimer > 150) {  // fast blink
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState);
+      ledTimer = millis();
+    }
+  }
+
+  // Connected but waiting for first input
+  else if (!firstValidInputReceived) {
+    if (millis() - ledTimer > 500) {  // slow blink
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState);
+      ledTimer = millis();
+    }
+  }
+
+  // Fully paired and active
+  else {
+    digitalWrite(LED_PIN, HIGH);  // solid ON
+  }
 
   /* ===== NOT CONNECTED ===== */
   if (!xboxController.isConnected()) {
@@ -151,8 +183,9 @@ if (!connectedPrinted) {
   if (xboxController.isWaitingForFirstNotification()) return;
 
   if (!firstInputPrinted) {
-    Serial.println("First controller input received");
-    firstInputPrinted = true;
+      Serial.println("First controller input received");
+      firstInputPrinted = true;
+      firstValidInputReceived = true;   // LED goes solid
   }
 
   auto notif = xboxController.xboxNotif;
