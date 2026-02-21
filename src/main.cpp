@@ -1,103 +1,207 @@
 #include <Arduino.h>
-#include <NimBLEDevice.h>
+#include <XboxSeriesXControllerESP32_asukiaaa.hpp>
 
-// Motor PWM pins
-#define MOTOR_L 4
-#define MOTOR_R 5
-#define LED_PIN 8
+// Any Xbox controller
+XboxSeriesXControllerESP32_asukiaaa::Core xboxController;
 
-// PWM config
-const int freq = 5000;
-const int resolution = 8; // 0-255
-const int channelL = 0;
-const int channelR = 1;
+/* ========= MOTOR PINS ========= */
+// Left drive motor
+#define LA 12
+#define LB 13
+#define LPWM 14
 
-// Xbox controller BLE service/characteristics UUIDs
-#define XBOX_SERVICE_UUID       "0000ffe0-0000-1000-8000-00805f9b34fb" // placeholder
-#define XBOX_REPORT_CHAR_UUID   "0000ffe1-0000-1000-8000-00805f9b34fb" // placeholder
+// Right drive motor
+#define RA 27
+#define RB 26
+#define RPWM 25
 
-NimBLEAdvertisedDevice* xboxDevice = nullptr;
-NimBLEClient* pClient = nullptr;
-NimBLERemoteCharacteristic* pReportChar = nullptr;
+// Weapon motor (temporary)
+#define WA 18
+#define WB 19
+#define WPWM 20
 
-bool connected = false;
+/* ========= PWM SETTINGS ========= */
+#define PWM_FREQ 20000
+#define PWM_RES 8   // 0–255 PWM
 
-void notifyCallback(NimBLERemoteCharacteristic* pRemoteChar,
-                    uint8_t* pData, size_t length, bool isNotify) {
-    if (length < 6) return; // ensure enough bytes
+// PWM CHANNELS (ESP32 uses channels, not pins)
+#define L_CHANNEL 0
+#define R_CHANNEL 1
+#define W_CHANNEL 2
 
-    // Parse joystick axes (example mapping, adjust per controller)
-    int16_t lx = (int16_t)((pData[1] << 8) | pData[0]); // left stick X
-    int16_t ly = (int16_t)((pData[3] << 8) | pData[2]); // left stick Y
-    bool aButton = pData[4] & 0x10;
+/* ========= STATE FLAGS ========= */
+bool robotEnabled = false;
+bool connectedPrinted = false;
+bool firstInputPrinted = false;
 
-    // Map from -32768→32767 to 0→255
-    int pwmL = map(lx, -32768, 32767, 0, 255);
-    int pwmR = map(ly, -32768, 32767, 0, 255);
+bool lbPressed = false;
+bool rbPressed = false;
+bool lbReleased = false;
+bool rbReleased = false;
 
-    // Output PWM
-    ledcWrite(channelL, pwmL);
-    ledcWrite(channelR, pwmR);
+unsigned long lastNotConnectedPrint = 0;
 
-    // Optional LED
-    digitalWrite(LED_PIN, aButton);
+/* ========= HELPER FUNCTIONS ========= */
 
-    Serial.printf("LX:%d LY:%d PWM L:%d PWM R:%d A:%d\n", lx, ly, pwmL, pwmR, aButton);
+// speed range: -1.0 → 1.0
+void setMotor(int aPin, int bPin, int pwmChannel, float speed) {
+  speed = constrain(speed, -1.0, 1.0);
+  int pwmVal = abs(speed) * 255;
+
+  if (speed > 0) {
+    digitalWrite(aPin, HIGH);
+    digitalWrite(bPin, LOW);
+  }
+  else if (speed < 0) {
+    digitalWrite(aPin, LOW);
+    digitalWrite(bPin, HIGH);
+  }
+  else {
+    digitalWrite(aPin, LOW);
+    digitalWrite(bPin, LOW);
+  }
+
+  ledcWrite(pwmChannel, pwmVal);
 }
 
-class AdvertisedDeviceCallbacks : public NimBLEAdvertisedDeviceCallbacks {
-    void onResult(NimBLEAdvertisedDevice* advertisedDevice) {
-        if (advertisedDevice->haveServiceUUID() &&
-            advertisedDevice->isAdvertisingService(NimBLEUUID(XBOX_SERVICE_UUID))) {
-            Serial.printf("Found Xbox controller: %s\n", advertisedDevice->getName().c_str());
-            xboxDevice = advertisedDevice;
-            NimBLEDevice::getScan()->stop();
-        }
-    }
-};
+// Arcade drive (RIGHT STICK)
+// x = turning, y = forward/back
+void driveFromJoystick(float x, float y) {
+
+  // standard differential mixing
+  float left = y + x;
+  float right = y - x;
+
+  // normalize to keep range -1 to 1
+  float maxVal = max(abs(left), abs(right));
+  if (maxVal > 1.0) {
+    left /= maxVal;
+    right /= maxVal;
+  }
+
+  // BOTH motors inverted (your drivetrain requires this)
+  setMotor(LA, LB, L_CHANNEL, -left);
+  setMotor(RA, RB, R_CHANNEL, -right);
+}
+
+/* ========= SETUP ========= */
 
 void setup() {
-    Serial.begin(115200);
-    delay(2000);
+  Serial.begin(115200);
+  Serial.println("Starting NimBLE Client");
 
-    pinMode(LED_PIN, OUTPUT);
+  xboxController.begin();
 
-    // PWM setup
-    ledcSetup(channelL, freq, resolution);
-    ledcAttachPin(MOTOR_L, channelL);
+  // Direction pins
+  pinMode(LA, OUTPUT);
+  pinMode(LB, OUTPUT);
+  pinMode(RA, OUTPUT);
+  pinMode(RB, OUTPUT);
+  pinMode(WA, OUTPUT);
+  pinMode(WB, OUTPUT);
 
-    ledcSetup(channelR, freq, resolution);
-    ledcAttachPin(MOTOR_R, channelR);
+  // ===== ESP32 PWM SETUP =====
 
-    // Initialize BLE
-    NimBLEDevice::init("ESP32_S3");
-    NimBLEScan* pScan = NimBLEDevice::getScan();
-    pScan->setAdvertisedDeviceCallbacks(new AdvertisedDeviceCallbacks());
-    pScan->setActiveScan(true);
-    pScan->start(10, false); // scan for 10 seconds
+  // Configure PWM channels
+  ledcSetup(L_CHANNEL, PWM_FREQ, PWM_RES);
+  ledcSetup(R_CHANNEL, PWM_FREQ, PWM_RES);
+  ledcSetup(W_CHANNEL, PWM_FREQ, PWM_RES);
+
+  // Attach pins to channels
+  ledcAttachPin(LPWM, L_CHANNEL);
+  ledcAttachPin(RPWM, R_CHANNEL);
+  ledcAttachPin(WPWM, W_CHANNEL);
+
+  Serial.println("PWM initialized");
 }
 
+/* ========= LOOP ========= */
+
 void loop() {
-    if (xboxDevice && !connected) {
-        Serial.println("Connecting to Xbox controller...");
-        pClient = NimBLEDevice::createClient();
-        if (pClient->connect(xboxDevice)) {
-            Serial.println("Connected!");
-            connected = true;
+  xboxController.onLoop();
 
-            pReportChar = pClient->getService(NimBLEUUID(XBOX_SERVICE_UUID))
-                                  ->getCharacteristic(NimBLEUUID(XBOX_REPORT_CHAR_UUID));
+  /* ===== NOT CONNECTED ===== */
+  if (!xboxController.isConnected()) {
+    connectedPrinted = false;
+    firstInputPrinted = false;
+    robotEnabled = false;
 
-            if (pReportChar) {
-                pReportChar->subscribe(true, notifyCallback);
-            } else {
-                Serial.println("Failed to find report characteristic");
-            }
-        } else {
-            Serial.println("Failed to connect");
-            xboxDevice = nullptr; // try scanning again
-        }
+    // stop motors immediately
+    driveFromJoystick(0, 0);
+    setMotor(WA, WB, W_CHANNEL, 0);
+
+    if (millis() - lastNotConnectedPrint > 2000) {
+      Serial.println("not connected");
+      lastNotConnectedPrint = millis();
     }
 
-    delay(50);
+    if (xboxController.getCountFailedConnection() > 2) {
+      ESP.restart();
+    }
+    return;
+  }
+
+  /* ===== CONNECTED (print once) ===== */
+  if (!connectedPrinted) {
+    Serial.println("CONNECTED");
+    Serial.println("Controller Address: " +
+                   xboxController.buildDeviceAddressStr());
+    connectedPrinted = true;
+  }
+
+  /* ===== WAIT FIRST INPUT ===== */
+  if (xboxController.isWaitingForFirstNotification()) {
+    return;
+  }
+
+  if (!firstInputPrinted) {
+    Serial.println("First controller input received");
+    firstInputPrinted = true;
+  }
+
+  auto notif = xboxController.xboxNotif;
+
+  /* ===== CONVERT JOYSTICK VALUES ===== */
+  // Library returns:
+  //   0 = positive
+  //   32767 = center
+  //   65535 = negative
+
+  float joyX = -(32767.0 - notif.joyRHori) / 32767.0;  // turning
+  float joyY = (32767.0 - notif.joyRVert) / 32767.0;   // forward/back
+
+  joyX = constrain(joyX, -1.0, 1.0);
+  joyY = constrain(joyY, -1.0, 1.0);
+
+  /* ===== JOYSTICK DEADBAND ===== */
+  if (abs(joyX) < 0.08) joyX = 0;
+  if (abs(joyY) < 0.08) joyY = 0;
+
+  /* ===== TRIGGER ===== */
+  float trigMax = XboxControllerNotificationParser::maxTrig;
+  float leftTrigger = notif.trigLT / trigMax;
+
+  /* ===== ENABLE ROBOT ===== */
+
+  if (notif.btnLB) lbPressed = true;
+  if (notif.btnRB) rbPressed = true;
+
+  if (!notif.btnLB && lbPressed) lbReleased = true;
+  if (!notif.btnRB && rbPressed) rbReleased = true;
+
+  if (!robotEnabled && lbReleased && rbReleased) {
+    robotEnabled = true;
+    Serial.println("ROBOT ENABLED");
+  }
+
+  /* ===== DRIVE ===== */
+
+  if (robotEnabled) {
+    driveFromJoystick(joyX, joyY);
+    setMotor(WA, WB, W_CHANNEL, leftTrigger);
+  }
+  else {
+    driveFromJoystick(0, 0);
+    setMotor(WA, WB, W_CHANNEL, 0);
+  }
 }
