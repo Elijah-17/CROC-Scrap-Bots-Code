@@ -2,7 +2,7 @@
 This code is used for CROC (Combat Robotics of Carleton) Scrap-Bots combat event. This uses xbox controllers to drive combat robots that consist of an ESP32 used to controll 2 drive motors and a weapon motor. 
 
 # Notes
-Follow correct power-on and safety procedures to ensure safe opperation of the robots and this code. 
+Follow correct power-on and safety procedures to ensure safe opperation of the robots and this code. This project references the  [arduino-XboxSeriesXControllerESP32](https://github.com/asukiaaa/arduino-XboxSeriesXControllerESP32) library by asukiaaa.
 
 # Controls
 In order to connect controller, type mac address into the '#define ALLOWED_CONTROLLER' line in the 'main.cpp' file. Next power on robot and place controller in pairing mode. 
