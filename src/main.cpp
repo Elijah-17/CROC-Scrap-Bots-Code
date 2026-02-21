@@ -4,6 +4,9 @@
 // Any Xbox controller
 XboxSeriesXControllerESP32_asukiaaa::Core xboxController;
 
+/* ========= CONTROLLER LOCK ========= */
+#define ALLOWED_CONTROLLER "c4:12:bf:d5:0a:00"   // <<< CHANGE THIS
+
 /* ========= MOTOR PINS ========= */
 // Left drive motor
 #define LA 12
@@ -15,16 +18,16 @@ XboxSeriesXControllerESP32_asukiaaa::Core xboxController;
 #define RB 26
 #define RPWM 25
 
-// Weapon motor (temporary)
+// Weapon motor
 #define WA 18
 #define WB 19
 #define WPWM 20
 
 /* ========= PWM SETTINGS ========= */
 #define PWM_FREQ 20000
-#define PWM_RES 8   // 0–255 PWM
+#define PWM_RES 8
 
-// PWM CHANNELS (ESP32 uses channels, not pins)
+// PWM CHANNELS
 #define L_CHANNEL 0
 #define R_CHANNEL 1
 #define W_CHANNEL 2
@@ -34,16 +37,14 @@ bool robotEnabled = false;
 bool connectedPrinted = false;
 bool firstInputPrinted = false;
 
-bool lbPressed = false;
-bool rbPressed = false;
-bool lbReleased = false;
-bool rbReleased = false;
+bool lbWasPressed = false;
+bool rbWasPressed = false;
+bool toggleArmed = false;
 
 unsigned long lastNotConnectedPrint = 0;
 
 /* ========= HELPER FUNCTIONS ========= */
 
-// speed range: -1.0 → 1.0
 void setMotor(int aPin, int bPin, int pwmChannel, float speed) {
   speed = constrain(speed, -1.0, 1.0);
   int pwmVal = abs(speed) * 255;
@@ -64,22 +65,16 @@ void setMotor(int aPin, int bPin, int pwmChannel, float speed) {
   ledcWrite(pwmChannel, pwmVal);
 }
 
-// Arcade drive (RIGHT STICK)
-// x = turning, y = forward/back
 void driveFromJoystick(float x, float y) {
-
-  // standard differential mixing
   float left = y + x;
   float right = y - x;
 
-  // normalize to keep range -1 to 1
   float maxVal = max(abs(left), abs(right));
   if (maxVal > 1.0) {
     left /= maxVal;
     right /= maxVal;
   }
 
-  // BOTH motors inverted (your drivetrain requires this)
   setMotor(LA, LB, L_CHANNEL, -left);
   setMotor(RA, RB, R_CHANNEL, -right);
 }
@@ -92,7 +87,6 @@ void setup() {
 
   xboxController.begin();
 
-  // Direction pins
   pinMode(LA, OUTPUT);
   pinMode(LB, OUTPUT);
   pinMode(RA, OUTPUT);
@@ -100,14 +94,10 @@ void setup() {
   pinMode(WA, OUTPUT);
   pinMode(WB, OUTPUT);
 
-  // ===== ESP32 PWM SETUP =====
-
-  // Configure PWM channels
   ledcSetup(L_CHANNEL, PWM_FREQ, PWM_RES);
   ledcSetup(R_CHANNEL, PWM_FREQ, PWM_RES);
   ledcSetup(W_CHANNEL, PWM_FREQ, PWM_RES);
 
-  // Attach pins to channels
   ledcAttachPin(LPWM, L_CHANNEL);
   ledcAttachPin(RPWM, R_CHANNEL);
   ledcAttachPin(WPWM, W_CHANNEL);
@@ -126,7 +116,6 @@ void loop() {
     firstInputPrinted = false;
     robotEnabled = false;
 
-    // stop motors immediately
     driveFromJoystick(0, 0);
     setMotor(WA, WB, W_CHANNEL, 0);
 
@@ -141,18 +130,25 @@ void loop() {
     return;
   }
 
-  /* ===== CONNECTED (print once) ===== */
-  if (!connectedPrinted) {
-    Serial.println("CONNECTED");
-    Serial.println("Controller Address: " +
-                   xboxController.buildDeviceAddressStr());
-    connectedPrinted = true;
-  }
+  /* ===== CONNECTED ===== */
+if (!connectedPrinted) {
 
-  /* ===== WAIT FIRST INPUT ===== */
-  if (xboxController.isWaitingForFirstNotification()) {
-    return;
-  }
+    String addr = xboxController.buildDeviceAddressStr();
+    Serial.println("CONNECTED");
+    Serial.println("Controller Address: " + addr);
+
+    // Check MAC address
+    if (addr != ALLOWED_CONTROLLER) {
+      Serial.println("WRONG CONTROLLER - RESTARTING ESP");
+      delay(500);
+      ESP.restart();   // Hard reset instead of disconnect
+    }
+
+    Serial.println("Correct controller verified");
+    connectedPrinted = true;
+}
+
+  if (xboxController.isWaitingForFirstNotification()) return;
 
   if (!firstInputPrinted) {
     Serial.println("First controller input received");
@@ -161,37 +157,41 @@ void loop() {
 
   auto notif = xboxController.xboxNotif;
 
-  /* ===== CONVERT JOYSTICK VALUES ===== */
-  // Library returns:
-  //   0 = positive
-  //   32767 = center
-  //   65535 = negative
-
-  float joyX = -(32767.0 - notif.joyRHori) / 32767.0;  // turning
-  float joyY = (32767.0 - notif.joyRVert) / 32767.0;   // forward/back
+  /* ===== JOYSTICK CONVERSION ===== */
+  float joyX = -(32767.0 - notif.joyRHori) / 32767.0;
+  float joyY =  (32767.0 - notif.joyRVert) / 32767.0;
 
   joyX = constrain(joyX, -1.0, 1.0);
   joyY = constrain(joyY, -1.0, 1.0);
 
-  /* ===== JOYSTICK DEADBAND ===== */
   if (abs(joyX) < 0.08) joyX = 0;
   if (abs(joyY) < 0.08) joyY = 0;
 
-  /* ===== TRIGGER ===== */
   float trigMax = XboxControllerNotificationParser::maxTrig;
   float leftTrigger = notif.trigLT / trigMax;
 
-  /* ===== ENABLE ROBOT ===== */
+  /* ===== ENABLE / DISABLE TOGGLE ===== */
 
-  if (notif.btnLB) lbPressed = true;
-  if (notif.btnRB) rbPressed = true;
+  bool lb = notif.btnLB;
+  bool rb = notif.btnRB;
 
-  if (!notif.btnLB && lbPressed) lbReleased = true;
-  if (!notif.btnRB && rbPressed) rbReleased = true;
+  // detect both pressed
+  if (lb && rb) {
+    toggleArmed = true;
+  }
 
-  if (!robotEnabled && lbReleased && rbReleased) {
-    robotEnabled = true;
-    Serial.println("ROBOT ENABLED");
+  // detect release after both were pressed
+  if (toggleArmed && !lb && !rb) {
+    robotEnabled = !robotEnabled;  // TOGGLE STATE
+    toggleArmed = false;
+
+    if (robotEnabled) {
+      Serial.println("ROBOT ENABLED");
+    } else {
+      Serial.println("ROBOT DISABLED");
+      driveFromJoystick(0, 0);
+      setMotor(WA, WB, W_CHANNEL, 0);
+    }
   }
 
   /* ===== DRIVE ===== */
