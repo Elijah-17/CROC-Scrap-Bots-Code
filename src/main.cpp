@@ -1,75 +1,73 @@
 #include <Arduino.h>
 #include <XboxSeriesXControllerESP32_asukiaaa.hpp>
 
-// Any Xbox controller
 XboxSeriesXControllerESP32_asukiaaa::Core xboxController;
 
 /* ========= CONTROLLER LOCK ========= */
-#define ALLOWED_CONTROLLER "c4:12:bf:d5:0a:00"   // <<< CHANGE THIS
+#define ALLOWED_CONTROLLER "c4:12:bf:d5:0a:00"
 
-/* ========= MOTOR PINS ========= */
-// Left drive motor
+/* ========= MOTOR PINS (DRV8833) ========= */
+// Left drive
 #define LA 12
-#define LB 13
-#define LPWM 14
+#define LB 14
 
-// Right drive motor
+// Right drive
 #define RA 27
 #define RB 26
-#define RPWM 25
 
-// Weapon motor
-#define WA 18
-#define WB 19
-#define WPWM 20
+// Weapon (FIXED: must be PWM-capable pins)
+#define WA 32
+#define WB 33
 
-/* ========= PWM SETTINGS ========= */
+#define LED_PIN 2
+
+/* ========= PWM ========= */
 #define PWM_FREQ 20000
 #define PWM_RES 8
 
-// PWM CHANNELS
-#define L_CHANNEL 0
-#define R_CHANNEL 1
-#define W_CHANNEL 2
+#define LA_CH 0
+#define LB_CH 1
+#define RA_CH 2
+#define RB_CH 3
+#define WA_CH 4
+#define WB_CH 5
 
-#define LED_PIN 2
-/* ========= STATE FLAGS ========= */
+/* ========= STATE ========= */
 bool robotEnabled = false;
-bool connectedPrinted = false;
-bool firstInputPrinted = false;
 
-bool lbWasPressed = false;
-bool rbWasPressed = false;
+bool driveReversed = false;
+bool weaponReversed = false;
+
 bool toggleArmed = false;
 
-unsigned long lastNotConnectedPrint = 0;
+// Edge detection
+bool startPrev = false;
+bool selectPrev = false;
 
 unsigned long ledTimer = 0;
 bool ledState = false;
 bool firstValidInputReceived = false;
 
-/* ========= HELPER FUNCTIONS ========= */
-
-void setMotor(int aPin, int bPin, int pwmChannel, float speed) {
+/* ========= MOTOR FUNCTION ========= */
+void setMotorDRV(int pinA, int chA, int pinB, int chB, float speed) {
   speed = constrain(speed, -1.0, 1.0);
-  int pwmVal = abs(speed) * 255;
+  int pwm = abs(speed) * 255;
 
   if (speed > 0) {
-    digitalWrite(aPin, HIGH);
-    digitalWrite(bPin, LOW);
+    ledcWrite(chA, pwm);
+    ledcWrite(chB, 0);
   }
   else if (speed < 0) {
-    digitalWrite(aPin, LOW);
-    digitalWrite(bPin, HIGH);
+    ledcWrite(chA, 0);
+    ledcWrite(chB, pwm);
   }
   else {
-    digitalWrite(aPin, LOW);
-    digitalWrite(bPin, LOW);
+    ledcWrite(chA, 0);
+    ledcWrite(chB, 0);
   }
-
-  ledcWrite(pwmChannel, pwmVal);
 }
 
+/* ========= DRIVE ========= */
 void driveFromJoystick(float x, float y) {
   float left = y + x;
   float right = y - x;
@@ -80,161 +78,120 @@ void driveFromJoystick(float x, float y) {
     right /= maxVal;
   }
 
-  setMotor(LA, LB, L_CHANNEL, -left);
-  setMotor(RA, RB, R_CHANNEL, -right);
+  if (driveReversed) {
+    left = -left;
+    right = -right;
+  }
+
+  setMotorDRV(LA, LA_CH, LB, LB_CH, left);
+  setMotorDRV(RA, RA_CH, RB, RB_CH, right);
 }
 
 /* ========= SETUP ========= */
-
 void setup() {
   Serial.begin(115200);
-  Serial.println("Starting NimBLE Client");
-
   xboxController.begin();
 
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
 
-  pinMode(LA, OUTPUT);
-  pinMode(LB, OUTPUT);
-  pinMode(RA, OUTPUT);
-  pinMode(RB, OUTPUT);
-  pinMode(WA, OUTPUT);
-  pinMode(WB, OUTPUT);
+  ledcSetup(LA_CH, PWM_FREQ, PWM_RES);
+  ledcSetup(LB_CH, PWM_FREQ, PWM_RES);
+  ledcSetup(RA_CH, PWM_FREQ, PWM_RES);
+  ledcSetup(RB_CH, PWM_FREQ, PWM_RES);
+  ledcSetup(WA_CH, PWM_FREQ, PWM_RES);
+  ledcSetup(WB_CH, PWM_FREQ, PWM_RES);
 
-  ledcSetup(L_CHANNEL, PWM_FREQ, PWM_RES);
-  ledcSetup(R_CHANNEL, PWM_FREQ, PWM_RES);
-  ledcSetup(W_CHANNEL, PWM_FREQ, PWM_RES);
+  ledcAttachPin(LA, LA_CH);
+  ledcAttachPin(LB, LB_CH);
+  ledcAttachPin(RA, RA_CH);
+  ledcAttachPin(RB, RB_CH);
+  ledcAttachPin(WA, WA_CH);
+  ledcAttachPin(WB, WB_CH);
 
-  ledcAttachPin(LPWM, L_CHANNEL);
-  ledcAttachPin(RPWM, R_CHANNEL);
-  ledcAttachPin(WPWM, W_CHANNEL);
-
-  Serial.println("PWM initialized");
+  Serial.println("DRV8833 Ready");
 }
 
 /* ========= LOOP ========= */
-
 void loop() {
   xboxController.onLoop();
 
-/* ===== LED STATUS HANDLING ===== */
-// Rapid blink while not connected
+  /* ===== LED ===== */
   if (!xboxController.isConnected()) {
-    if (millis() - ledTimer > 150) {  // fast blink
+    if (millis() - ledTimer > 150) {
       ledState = !ledState;
       digitalWrite(LED_PIN, ledState);
       ledTimer = millis();
-    }
-  }
-
-  // Connected but waiting for first input
-  else if (!firstValidInputReceived) {
-    if (millis() - ledTimer > 500) {  // slow blink
-      ledState = !ledState;
-      digitalWrite(LED_PIN, ledState);
-      ledTimer = millis();
-    }
-  }
-
-  // Fully paired and active
-  else {
-    digitalWrite(LED_PIN, HIGH);  // solid ON
-  }
-
-  /* ===== NOT CONNECTED ===== */
-  if (!xboxController.isConnected()) {
-    connectedPrinted = false;
-    firstInputPrinted = false;
-    robotEnabled = false;
-
-    driveFromJoystick(0, 0);
-    setMotor(WA, WB, W_CHANNEL, 0);
-
-    if (millis() - lastNotConnectedPrint > 2000) {
-      Serial.println("not connected");
-      lastNotConnectedPrint = millis();
-    }
-
-    if (xboxController.getCountFailedConnection() > 2) {
-      ESP.restart();
     }
     return;
   }
 
-  /* ===== CONNECTED ===== */
-if (!connectedPrinted) {
-
-    String addr = xboxController.buildDeviceAddressStr();
-    Serial.println("CONNECTED");
-    Serial.println("Controller Address: " + addr);
-
-    // Check MAC address
-    if (addr != ALLOWED_CONTROLLER) {
-      Serial.println("WRONG CONTROLLER - RESTARTING ESP");
-      delay(500);
-      ESP.restart();   // Hard reset instead of disconnect
+  if (!firstValidInputReceived) {
+    if (millis() - ledTimer > 500) {
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState);
+      ledTimer = millis();
     }
-
-    Serial.println("Correct controller verified");
-    connectedPrinted = true;
-}
+  } else {
+    digitalWrite(LED_PIN, HIGH);
+  }
 
   if (xboxController.isWaitingForFirstNotification()) return;
 
-  if (!firstInputPrinted) {
-      Serial.println("First controller input received");
-      firstInputPrinted = true;
-      firstValidInputReceived = true;   // LED goes solid
-  }
-
   auto notif = xboxController.xboxNotif;
+  firstValidInputReceived = true;
 
-  /* ===== JOYSTICK CONVERSION ===== */
-  float joyX = -(32767.0 - notif.joyRHori) / 32767.0;
-  float joyY =  (32767.0 - notif.joyRVert) / 32767.0;
-
-  joyX = constrain(joyX, -1.0, 1.0);
-  joyY = constrain(joyY, -1.0, 1.0);
+  /* ===== JOYSTICK ===== */
+  float joyX = notif.joyRHori / 32767.0;
+  float joyY = -notif.joyRVert / 32767.0;
 
   if (abs(joyX) < 0.08) joyX = 0;
   if (abs(joyY) < 0.08) joyY = 0;
 
-  float trigMax = XboxControllerNotificationParser::maxTrig;
-  float leftTrigger = notif.trigLT / trigMax;
+  /* ===== TRIGGER (FIXED) ===== */
+  float rightTrigger = notif.trigRT / 1023.0;
 
-  /* ===== ENABLE / DISABLE TOGGLE ===== */
-
+  /* ===== ENABLE TOGGLE ===== */
   bool lb = notif.btnLB;
   bool rb = notif.btnRB;
 
-  // detect both pressed
-  if (lb && rb) {
-    toggleArmed = true;
-  }
+  if (lb && rb) toggleArmed = true;
 
-  // detect release after both were pressed
   if (toggleArmed && !lb && !rb) {
-    robotEnabled = !robotEnabled;  // TOGGLE STATE
+    robotEnabled = !robotEnabled;
     toggleArmed = false;
-
-    if (robotEnabled) {
-      Serial.println("ROBOT ENABLED");
-    } else {
-      Serial.println("ROBOT DISABLED");
-      driveFromJoystick(0, 0);
-      setMotor(WA, WB, W_CHANNEL, 0);
-    }
+    Serial.println(robotEnabled ? "ENABLED" : "DISABLED");
   }
 
-  /* ===== DRIVE ===== */
+  /* ===== START / SELECT TOGGLES ===== */
+  bool startBtn = notif.btnStart;
+  bool selectBtn = notif.btnSelect;
 
+  // Drive reverse toggle
+  if (startBtn && !startPrev) {
+    driveReversed = !driveReversed;
+    Serial.println(driveReversed ? "Drive Reversed" : "Drive Normal");
+  }
+
+  // Weapon reverse toggle
+  if (selectBtn && !selectPrev) {
+    weaponReversed = !weaponReversed;
+    Serial.println(weaponReversed ? "Weapon Reversed" : "Weapon Normal");
+  }
+
+  startPrev = startBtn;
+  selectPrev = selectBtn;
+
+  /* ===== OUTPUT ===== */
   if (robotEnabled) {
     driveFromJoystick(joyX, joyY);
-    setMotor(WA, WB, W_CHANNEL, leftTrigger);
+
+    float weaponSpeed = rightTrigger;
+    if (weaponReversed) weaponSpeed *= -1;
+
+    setMotorDRV(WA, WA_CH, WB, WB_CH, weaponSpeed);
   }
   else {
     driveFromJoystick(0, 0);
-    setMotor(WA, WB, W_CHANNEL, 0);
+    setMotorDRV(WA, WA_CH, WB, WB_CH, 0);
   }
 }
