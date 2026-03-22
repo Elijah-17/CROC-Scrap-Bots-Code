@@ -50,7 +50,9 @@ bool firstValidInputReceived = false;
 /* ========= MOTOR FUNCTION ========= */
 void setMotorDRV(int pinA, int chA, int pinB, int chB, float speed) {
   speed = constrain(speed, -1.0, 1.0);
-  int pwm = abs(speed) * 255;
+
+  const int MIN_PWM = 60; // 🔥 NEW: minimum PWM to overcome motor deadzone
+  int pwm = abs(speed) * (255 - MIN_PWM) + MIN_PWM;
 
   if (speed > 0) {
     ledcWrite(chA, pwm);
@@ -66,9 +68,9 @@ void setMotorDRV(int pinA, int chA, int pinB, int chB, float speed) {
   }
 }
 
-/* ========= DRIVE (FIXED) ========= */
+/* ========= DRIVE ========= */
 void driveFromJoystick(float x, float y) {
-  const float deadzone = 0.10;
+  const float deadzone = 0.01;
 
   // --- Deadzone ---
   if (fabs(x) < deadzone) x = 0;
@@ -81,6 +83,11 @@ void driveFromJoystick(float x, float y) {
   if (y != 0)
     y = (fabs(y) - deadzone) / (1.0 - deadzone) * (y > 0 ? 1 : -1);
 
+  // --- EXPO CURVE ---
+  float expo = 0.6;
+  x = (1 - expo) * x + expo * x * x * x;
+  y = (1 - expo) * y + expo * y * y * y;
+
   // --- Arcade mix ---
   float left  = y + x;
   float right = y - x;
@@ -92,7 +99,11 @@ void driveFromJoystick(float x, float y) {
     right /= maxVal;
   }
 
-  // --- HARD STOP (prevents drift) ---
+  // ===== 🔥 NEW: SPEED LIMIT =====
+  left  *= 0.80;
+  right *= 0.80;
+
+  // --- HARD STOP ---
   if (x == 0 && y == 0) {
     left = 0;
     right = 0;
@@ -111,8 +122,10 @@ void driveFromJoystick(float x, float y) {
   Serial.print(" R: "); Serial.println(right, 3);
 
   // --- Output ---
-  setMotorDRV(LA, LA_CH, LB, LB_CH, left);
-  setMotorDRV(RA, RA_CH, RB, RB_CH, right);
+  if(robotEnabled){
+    setMotorDRV(LA, LA_CH, LB, LB_CH, left);
+    setMotorDRV(RA, RA_CH, RB, RB_CH, right);
+  }
 }
 
 /* ========= SETUP ========= */
@@ -137,13 +150,14 @@ void setup() {
   ledcAttachPin(WB, WB_CH);
 
   Serial.println("DRV8833 Ready");
+  setMotorDRV(LA, LA_CH, LB, LB_CH, 0);
+  setMotorDRV(RA, RA_CH, RB, RB_CH, 0);
 }
 
 /* ========= LOOP ========= */
 void loop() {
   xboxController.onLoop();
 
-  /* ===== LED ===== */
   if (!xboxController.isConnected()) {
     if (millis() - ledTimer > 150) {
       ledState = !ledState;
@@ -168,14 +182,11 @@ void loop() {
   auto notif = xboxController.xboxNotif;
   firstValidInputReceived = true;
 
-  /* ===== JOYSTICK ===== */
-float joyX = (notif.joyRHori - 32768) / 32768.0;
-float joyY = -(notif.joyRVert - 32768) / 32768.0;
+  float joyX = (notif.joyRHori - 32768) / 32768.0;
+  float joyY = -(notif.joyRVert - 32768) / 32768.0;
 
-  /* ===== TRIGGER ===== */
   float rightTrigger = notif.trigRT / 1023.0;
 
-  /* ===== ENABLE TOGGLE ===== */
   bool lb = notif.btnLB;
   bool rb = notif.btnRB;
 
@@ -187,7 +198,6 @@ float joyY = -(notif.joyRVert - 32768) / 32768.0;
     Serial.println(robotEnabled ? "ENABLED" : "DISABLED");
   }
 
-  /* ===== START / SELECT TOGGLES ===== */
   bool startBtn = notif.btnStart;
   bool selectBtn = notif.btnSelect;
 
@@ -204,7 +214,6 @@ float joyY = -(notif.joyRVert - 32768) / 32768.0;
   startPrev = startBtn;
   selectPrev = selectBtn;
 
-  /* ===== OUTPUT ===== */
   if (robotEnabled) {
     driveFromJoystick(joyX, joyY);
 
