@@ -15,7 +15,7 @@ XboxSeriesXControllerESP32_asukiaaa::Core xboxController;
 #define RA 27
 #define RB 26
 
-// Weapon (FIXED: must be PWM-capable pins)
+// Weapon
 #define WA 32
 #define WB 33
 
@@ -40,7 +40,6 @@ bool weaponReversed = false;
 
 bool toggleArmed = false;
 
-// Edge detection
 bool startPrev = false;
 bool selectPrev = false;
 
@@ -67,22 +66,51 @@ void setMotorDRV(int pinA, int chA, int pinB, int chB, float speed) {
   }
 }
 
-/* ========= DRIVE ========= */
+/* ========= DRIVE (FIXED) ========= */
 void driveFromJoystick(float x, float y) {
-  float left = y + x;
+  const float deadzone = 0.10;
+
+  // --- Deadzone ---
+  if (fabs(x) < deadzone) x = 0;
+  if (fabs(y) < deadzone) y = 0;
+
+  // --- Rescale ---
+  if (x != 0)
+    x = (fabs(x) - deadzone) / (1.0 - deadzone) * (x > 0 ? 1 : -1);
+
+  if (y != 0)
+    y = (fabs(y) - deadzone) / (1.0 - deadzone) * (y > 0 ? 1 : -1);
+
+  // --- Arcade mix ---
+  float left  = y + x;
   float right = y - x;
 
-  float maxVal = max(abs(left), abs(right));
+  // --- Normalize ---
+  float maxVal = max(fabs(left), fabs(right));
   if (maxVal > 1.0) {
-    left /= maxVal;
+    left  /= maxVal;
     right /= maxVal;
   }
 
+  // --- HARD STOP (prevents drift) ---
+  if (x == 0 && y == 0) {
+    left = 0;
+    right = 0;
+  }
+
+  // --- Reverse toggle ---
   if (driveReversed) {
     left = -left;
     right = -right;
   }
 
+  // --- DEBUG PRINT ---
+  Serial.print("X: "); Serial.print(x, 3);
+  Serial.print(" Y: "); Serial.print(y, 3);
+  Serial.print(" | L: "); Serial.print(left, 3);
+  Serial.print(" R: "); Serial.println(right, 3);
+
+  // --- Output ---
   setMotorDRV(LA, LA_CH, LB, LB_CH, left);
   setMotorDRV(RA, RA_CH, RB, RB_CH, right);
 }
@@ -141,13 +169,10 @@ void loop() {
   firstValidInputReceived = true;
 
   /* ===== JOYSTICK ===== */
-  float joyX = notif.joyRHori / 32767.0;
-  float joyY = -notif.joyRVert / 32767.0;
+float joyX = (notif.joyRHori - 32768) / 32768.0;
+float joyY = -(notif.joyRVert - 32768) / 32768.0;
 
-  if (abs(joyX) < 0.08) joyX = 0;
-  if (abs(joyY) < 0.08) joyY = 0;
-
-  /* ===== TRIGGER (FIXED) ===== */
+  /* ===== TRIGGER ===== */
   float rightTrigger = notif.trigRT / 1023.0;
 
   /* ===== ENABLE TOGGLE ===== */
@@ -166,13 +191,11 @@ void loop() {
   bool startBtn = notif.btnStart;
   bool selectBtn = notif.btnSelect;
 
-  // Drive reverse toggle
   if (startBtn && !startPrev) {
     driveReversed = !driveReversed;
     Serial.println(driveReversed ? "Drive Reversed" : "Drive Normal");
   }
 
-  // Weapon reverse toggle
   if (selectBtn && !selectPrev) {
     weaponReversed = !weaponReversed;
     Serial.println(weaponReversed ? "Weapon Reversed" : "Weapon Normal");
