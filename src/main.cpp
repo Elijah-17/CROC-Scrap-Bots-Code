@@ -9,7 +9,7 @@ XboxSeriesXControllerESP32_asukiaaa::Core xboxController;
 /* ========= MOTOR PINS (DRV8833) ========= */
 // Left drive
 #define LA 12
-#define LB 14
+#define LB 13
 
 // Right drive
 #define RA 27
@@ -51,7 +51,7 @@ bool firstValidInputReceived = false;
 void setMotorDRV(int pinA, int chA, int pinB, int chB, float speed) {
   speed = constrain(speed, -1.0, 1.0);
 
-  const int MIN_PWM = 60; // 🔥 NEW: minimum PWM to overcome motor deadzone
+  const int MIN_PWM = 60; // NEW: minimum PWM to overcome motor deadzone
   int pwm = abs(speed) * (255 - MIN_PWM) + MIN_PWM;
 
   if (speed > 0) {
