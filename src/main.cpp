@@ -5,17 +5,13 @@ XboxSeriesXControllerESP32_asukiaaa::Core xboxController;
 
 /* ========= CONTROLLER LOCK ========= */
 #define ALLOWED_CONTROLLER "c4:12:bf:d5:0a:00"
+//#define ALLOWED_CONTROLLER "ff:ff:ff:ff:ff:ff"
 
 /* ========= MOTOR PINS (DRV8833) ========= */
-// Left drive
 #define LA 12
 #define LB 13
-
-// Right drive
 #define RA 27
 #define RB 26
-
-// Weapon
 #define WA 32
 #define WB 33
 
@@ -47,11 +43,16 @@ unsigned long ledTimer = 0;
 bool ledState = false;
 bool firstValidInputReceived = false;
 
+/* 🔥 NEW: connection debug flags */
+bool connectedPrinted = false;
+bool firstInputPrinted = false;
+unsigned long lastNotConnectedPrint = 0;
+
 /* ========= MOTOR FUNCTION ========= */
 void setMotorDRV(int pinA, int chA, int pinB, int chB, float speed) {
   speed = constrain(speed, -1.0, 1.0);
 
-  const int MIN_PWM = 60; // NEW: minimum PWM to overcome motor deadzone
+  const int MIN_PWM = 60;
   int pwm = abs(speed) * (255 - MIN_PWM) + MIN_PWM;
 
   if (speed > 0) {
@@ -72,56 +73,46 @@ void setMotorDRV(int pinA, int chA, int pinB, int chB, float speed) {
 void driveFromJoystick(float x, float y) {
   const float deadzone = 0.01;
 
-  // --- Deadzone ---
   if (fabs(x) < deadzone) x = 0;
   if (fabs(y) < deadzone) y = 0;
 
-  // --- Rescale ---
   if (x != 0)
     x = (fabs(x) - deadzone) / (1.0 - deadzone) * (x > 0 ? 1 : -1);
 
   if (y != 0)
     y = (fabs(y) - deadzone) / (1.0 - deadzone) * (y > 0 ? 1 : -1);
 
-  // --- EXPO CURVE ---
   float expo = 0.6;
   x = (1 - expo) * x + expo * x * x * x;
   y = (1 - expo) * y + expo * y * y * y;
 
-  // --- Arcade mix ---
   float left  = y + x;
   float right = y - x;
 
-  // --- Normalize ---
   float maxVal = max(fabs(left), fabs(right));
   if (maxVal > 1.0) {
     left  /= maxVal;
     right /= maxVal;
   }
 
-  // ===== 🔥 NEW: SPEED LIMIT =====
   left  *= 0.80;
   right *= 0.80;
 
-  // --- HARD STOP ---
   if (x == 0 && y == 0) {
     left = 0;
     right = 0;
   }
 
-  // --- Reverse toggle ---
   if (driveReversed) {
     left = -left;
     right = -right;
   }
 
-  // --- DEBUG PRINT ---
-  Serial.print("X: "); Serial.print(x, 3);
+  /*Serial.print("X: "); Serial.print(x, 3);
   Serial.print(" Y: "); Serial.print(y, 3);
   Serial.print(" | L: "); Serial.print(left, 3);
-  Serial.print(" R: "); Serial.println(right, 3);
+  Serial.print(" R: "); Serial.println(right, zzzzzzaaaaaaa3);*/
 
-  // --- Output ---
   if(robotEnabled){
     setMotorDRV(LA, LA_CH, LB, LB_CH, left);
     setMotorDRV(RA, RA_CH, RB, RB_CH, right);
@@ -131,6 +122,8 @@ void driveFromJoystick(float x, float y) {
 /* ========= SETUP ========= */
 void setup() {
   Serial.begin(115200);
+  Serial.println("Starting NimBLE Client");
+
   xboxController.begin();
 
   pinMode(LED_PIN, OUTPUT);
@@ -150,21 +143,52 @@ void setup() {
   ledcAttachPin(WB, WB_CH);
 
   Serial.println("DRV8833 Ready");
-  setMotorDRV(LA, LA_CH, LB, LB_CH, 0);
-  setMotorDRV(RA, RA_CH, RB, RB_CH, 0);
 }
 
 /* ========= LOOP ========= */
 void loop() {
   xboxController.onLoop();
 
+  /* ===== NOT CONNECTED ===== */
   if (!xboxController.isConnected()) {
+    connectedPrinted = false;
+    firstInputPrinted = false;
+    robotEnabled = false;
+
     if (millis() - ledTimer > 150) {
       ledState = !ledState;
       digitalWrite(LED_PIN, ledState);
       ledTimer = millis();
     }
+
+    if (millis() - lastNotConnectedPrint > 2000) {
+      Serial.println("not connected");
+      lastNotConnectedPrint = millis();
+    }
+
+    if (xboxController.getCountFailedConnection() > 2) {
+      ESP.restart();
+    }
+
     return;
+  }
+
+  /* ===== CONNECTED ===== */
+  if (!connectedPrinted) {
+    String addr = xboxController.buildDeviceAddressStr();
+
+    Serial.println("CONNECTED");
+    Serial.println("Controller Address: " + addr);
+
+    /*
+    if (addr != ALLOWED_CONTROLLER) {
+      Serial.println("WRONG CONTROLLER - RESTARTING ESP");
+      delay(500);
+      ESP.restart();
+    }*/
+
+    Serial.println("Correct controller verified");
+    connectedPrinted = true;
   }
 
   if (!firstValidInputReceived) {
@@ -179,8 +203,13 @@ void loop() {
 
   if (xboxController.isWaitingForFirstNotification()) return;
 
+  if (!firstInputPrinted) {
+    Serial.println("First controller input received");
+    firstInputPrinted = true;
+    firstValidInputReceived = true;
+  }
+
   auto notif = xboxController.xboxNotif;
-  firstValidInputReceived = true;
 
   float joyX = (notif.joyRHori - 32768) / 32768.0;
   float joyY = -(notif.joyRVert - 32768) / 32768.0;
